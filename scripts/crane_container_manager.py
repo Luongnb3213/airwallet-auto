@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -843,7 +844,91 @@ def excel_lock_path(xlsx_path: Path) -> Path:
     return xlsx_path.parent / f".~lock.{xlsx_path.name}#"
 
 
+@contextlib.contextmanager
+def container_assignment_lock(xlsx_path: Path, timeout: float = 180.0):
+    """Serialise container *selection* across processes.
+
+    Why this is needed: picking a container is a read-decide-write across the
+    workbook. `assigned_container_rows()` reads which containers other rows
+    already hold, `ensure_row()` picks one that looks free, and only the final
+    `write_crane_assignment()` takes `excel_write_lock`. With one
+    `ensure-row` process per device (airwallet_batch_flow starts a thread per
+    device, each spawning airwallet_full_flow, which spawns this script), two
+    processes can both read "container X is free" and both claim it -- putting
+    two accounts in one container.
+
+    Deliberately a *separate* lock file from `excel_write_lock`: that lock is
+    not reentrant, and `write_crane_assignment` takes it while we hold this one.
+
+    The whole decision, including the Crane RPC, runs under this lock. That
+    serialises assignment across devices, which is acceptable because
+    `crane_slots_default()` already caps concurrent Crane host sessions at 2.
+    If the added latency ever matters, the next step is to claim the container
+    in Excel before the RPC and release the lock earlier.
+    """
+    path = Path(xlsx_path).expanduser()
+    lock_path = path.parent / f".{path.name}.crane-assign.lock"
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+b")
+    except OSError as error:
+        # Cannot create the lock: say so and continue unserialised rather than
+        # stop the farm. The race returns, so this is worth a log line.
+        print(f"[crane] Không tạo được lock gán container ({error}); "
+              "chạy không tuần tự hoá, có nguy cơ hai row trùng container.",
+              file=sys.stderr, flush=True)
+        yield
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(bytes(1))
+                handle.flush()
+            deadline = time.monotonic() + max(1.0, float(timeout))
+            while True:
+                try:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            "Hết thời gian chờ khóa gán container Crane."
+                        ) from None
+                    time.sleep(0.05)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        handle.close()
+
+
 def ensure_row(args: argparse.Namespace) -> dict:
+    """Select and record this row's container, serialised across processes."""
+    with container_assignment_lock(Path(args.xlsx).expanduser()):
+        return _ensure_row_locked(args)
+
+
+def _ensure_row_locked(args: argparse.Namespace) -> dict:
     from airwallet_profile_from_excel import load_row, profile_from_record
 
     xlsx_path = Path(args.xlsx).expanduser()

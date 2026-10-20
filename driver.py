@@ -26,7 +26,11 @@ def connect(device_id='auto', wait_seconds=3):
     app = next((a for a in device.enumerate_applications() if a.identifier == BUNDLE), None)
     if app is None:
         raise RuntimeError(f'Chưa tìm thấy AirWallet ({BUNDLE}) trên {device.name}.')
-    suspended = not app.pid
+    # Two separate facts: whether the process is still suspended right now, and
+    # whether we are the ones who launched it. The second decides who owns it on
+    # the failure path, and it must survive the resume below.
+    spawned_here = not app.pid
+    suspended = spawned_here
     pid = app.pid or device.spawn([BUNDLE])
     session = None
     try:
@@ -43,12 +47,20 @@ def connect(device_id='auto', wait_seconds=3):
         time.sleep(wait_seconds)
         return device, session, script, messages
     except BaseException:
-        try:
-            if suspended:
-                device.resume(pid)
-        finally:
-            if session is not None:
+        # connect() either hands back a working session or leaves no trace. A
+        # process we spawned and could not attach to would otherwise stay on the
+        # device, suspended or half-initialised, for nobody.
+        # Each step is isolated so cleanup never masks the original failure.
+        if session is not None:
+            try:
                 session.detach()
+            except Exception:
+                pass
+        if spawned_here:
+            try:
+                device.kill(pid)
+            except Exception:
+                pass
         raise
 
 

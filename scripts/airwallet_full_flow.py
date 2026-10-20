@@ -188,13 +188,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    from src.utils.secret_files import reap_stale
+    # Older revisions wrote the profile (with the PIN) here and relied on a
+    # `finally` that a SIGKILL'd row never reached. Reclaim any leftovers.
+    stale = reap_stale(ROOT_DIR / 'agents' / 'runtime', 'input_*.json', 3600)
+    if stale:
+        print(f'[flow] Đã xoá {len(stale)} file profile tạm sót lại từ lần chạy trước '
+              f'(chứa PIN plaintext).', flush=True)
     from flow import ensure_configured, validate_profile, load_settings, build_otp_client
     from airwallet_profile_from_excel import load_row, profile_from_record
     from airwallet_dom_runner import run_with_frida, build_parser as dom_parser
     ensure_configured()
     xlsx = Path(args.xlsx).expanduser()
     settings = load_settings()
-    runtime_profile = None
     result = None
     try:
         record, row_number, sheet = load_row(xlsx, args.sheet, args.row)
@@ -221,10 +227,7 @@ def main() -> int:
             if not isinstance(crane_result, dict) or crane_result.get('ok') is not True:
                 raise RuntimeError('Crane chưa xác nhận container sẵn sàng; chưa mở app để đăng ký.')
         safe_device = re.sub(r'[^A-Za-z0-9_.-]+', '_', args.device_id)[:48]
-        runtime_profile = ROOT_DIR / 'agents' / 'runtime' / f'input_{safe_device}_{row_number}_{os.getpid()}.json'
-        runtime_profile.parent.mkdir(parents=True, exist_ok=True)
-        runtime_profile.write_text(json.dumps(profile, ensure_ascii=False), encoding='utf-8')
-        dom_args = ['--action', 'run', '--profile-json', str(runtime_profile), '--device-id', args.device_id,
+        dom_args = ['--action', 'run', '--device-id', args.device_id,
                     '--max-steps', str(args.max_steps), '--wait-timeout-ms', str(args.wait_timeout_ms)]
         if not args.no_container:
             dom_args.append('--fresh-launch')
@@ -232,6 +235,11 @@ def main() -> int:
             dom_args.append('--no-submit')
         parsed_dom_args = dom_parser().parse_args(dom_args)
         parsed_dom_args.proxy_prepared = True
+        # run_with_frida runs in this process, so hand the profile over in
+        # memory. It used to be written to agents/runtime/input_*.json and
+        # deleted in `finally` -- but airwallet_batch_flow kills a hung row with
+        # SIGKILL, which no `finally` survives, leaving a plaintext PIN on disk.
+        parsed_dom_args.profile_data = profile
         result = run_with_frida(parsed_dom_args)
         result['proxy'] = proxy_result
         destination = ROOT_DIR / 'dumps' / f'row-{row_number}-{safe_device}-{os.getpid()}.json'
@@ -259,9 +267,7 @@ def main() -> int:
             write_row_status(xlsx, args.sheet, args.row, 'FAILED', message)
         print('[airwallet] ' + message, file=sys.stderr, flush=True)
         return 1
-    finally:
-        if runtime_profile is not None:
-            runtime_profile.unlink(missing_ok=True)
+
 
 
 if __name__ == "__main__":

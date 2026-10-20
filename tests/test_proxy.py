@@ -13,6 +13,10 @@ import openpyxl
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from frida_stub import install_frida_stub
+
+install_frida_stub()  # no-op when the real frida is installed
 from src.core.airwallet_proxy import parse_proxy, reserve_proxy, prepare_account_proxy
 from scripts.proxy_switcher import Phone, apply_proxy
 import airwallet_full_flow as full

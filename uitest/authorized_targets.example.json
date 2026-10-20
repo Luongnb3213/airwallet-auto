@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "Allow-list of apps the UI testing adapter may drive. Copy to",
+    "authorized_targets.json and edit. Nothing is in scope unless it is listed here.",
+    "",
+    "environment must be one of: test, demo, staging, sandbox, local. A production",
+    "bundle id cannot be declared -- AuthorizedTarget rejects it.",
+    "",
+    "authorization_ref is the ticket, contract or written permission that covers this",
+    "testing, and owner is the person accountable for the test account/data. Both are",
+    "mandatory so a run can always be traced back to who authorized it.",
+    "",
+    "allow_business_writes defaults to false. Turn it on only for a target where",
+    "completing a real business operation (a transfer, an order, a reward claim) is",
+    "part of the agreed test scope, on test data. It stays false for anything backed",
+    "by real money, a real campaign or a real third-party account."
+  ],
+  "targets": [
+    {
+      "bundle_id": "com.example.demo",
+      "environment": "demo",
+      "authorization_ref": "QA-1042",
+      "owner": "qa@example.com",
+      "allow_business_writes": false,
+      "notes": "Demo build used by the adapter's own integration tests."
+    }
+  ]
+}

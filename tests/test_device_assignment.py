@@ -6,6 +6,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from frida_stub import install_frida_stub
+
+install_frida_stub()  # no-op when the real frida is installed
 import driver
 import main
 

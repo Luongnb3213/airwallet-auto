@@ -95,10 +95,18 @@ def spawn_slot(slots: int | None = None, timeout: float = 120.0, poll: float = 0
                 continue
             try:
                 _try_lock(candidate)
-                fd = candidate
-                break
             except OSError:
                 os.close(candidate)
+                continue          # slot is held by someone else; try the next one
+            except BaseException:
+                # msvcrt/fcntl can raise beyond OSError (ValueError on a bad fd,
+                # KeyboardInterrupt mid-call). Close before unwinding, or the
+                # descriptor leaks for the life of the process.
+                os.close(candidate)
+                raise
+            else:
+                fd = candidate
+                break
         if fd is not None:
             break
         if time.time() >= deadline:

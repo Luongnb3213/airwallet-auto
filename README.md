@@ -112,3 +112,33 @@ python -X utf8 -m unittest discover -s tests -v
 Các test dùng dữ liệu giả và thư mục tạm, không cần workbook tài khoản thật.
 Test chính sách modal dùng Node.js nếu có. Chi tiết các màn đã ghép luồng nằm
 trong `docs/guided-mapping.md` và `docs/LINE_COIN-reference.md`.
+
+**Không cần cài `frida` để chạy test.** `driver.py` và các script trong
+`scripts/` import `frida` ở module scope, nên trước đây năm module test không
+import được trên máy không có nó — kể cả hai module phủ `airwallet_dom_runner`
+và `airwallet_full_flow`. `tests/frida_stub.py` đăng ký `frida`/`frida_tools`
+rỗng vào `sys.modules` khi thiếu package thật, và **không làm gì** khi đã có
+package thật. Stub cố tình inert: không liệt kê thiết bị nào và báo lỗi rõ ràng
+nếu có code thật sự muốn spawn/attach, nên nó không thể làm một test pass trong
+khi lẽ ra fail với Frida thật. Test nào cần hành vi thiết bị thì tự mock.
+
+## UI testing adapter (`uitest/`)
+
+Module riêng, dành cho **app kiểm thử được cấp phép**, không nối vào luồng đăng ký
+ở trên. Mọi tương tác đi qua framework kiểm thử giao diện (XCUITest/WebDriverAgent)
+thay vì gọi trực tiếp method UIKit, chọn phần tử theo accessibility identifier, và
+chỉ coi là thành công khi trạng thái giao diện được kiểm chứng. Target phải được
+khai báo trong `uitest/authorized_targets.json` (xem file `.example.json`); không
+có target mặc định.
+
+```powershell
+python -X utf8 -m unittest tests.test_uitest_waits tests.test_uitest_adapter tests.test_uitest_crane_session tests.test_uitest_integration
+```
+
+83 test, chạy bằng mock: không cần thiết bị, Frida hay mạng.
+
+| Tài liệu | Nội dung |
+| --- | --- |
+| `docs/ui-automation-audit.md` | Báo cáo kiến trúc tương tác hiện tại, kèm danh sách giới hạn bảo mật và kỹ thuật |
+| `docs/ui-automation-architecture.md` | Kiến trúc đề xuất, quản lý thời gian, tích hợp Crane, trạng thái kiểm chứng |
+| `docs/ios-interaction-methods.md` | So sánh các lớp tương tác iOS: chạm vật lý, framework kiểm thử, target/action, API riêng tư |

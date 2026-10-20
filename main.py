@@ -12,6 +12,7 @@ from flow import ensure_configured, run_signup, validate_profile, build_otp_clie
 from inputs import load_signup_input, select_device_id
 from diagnostics import diagnose, pretty_diagnosis
 from src.core.airwallet_proxy import prepare_profile_proxy
+from src.utils.redaction import redact
 
 ROOT = Path(__file__).resolve().parent
 
@@ -47,13 +48,15 @@ def main():
     args = parser.parse_args()
     session = None
     guard = None
+    # Bound before the try so the redacting handler below can always reach them.
+    config = {}
+    profile = None
     try:
         if args.action == 'devices':
             print(json.dumps([{'id': d.id, 'name': d.name, 'type': d.type}
                               for d in driver.frida.enumerate_devices() if d.type == 'usb'], ensure_ascii=False, indent=2))
             return 0
         config = load_config(args.config)
-        profile = None
         if args.action == 'signup':
             ensure_configured()
             try:
@@ -108,13 +111,25 @@ def main():
         print('Saved: ' + str(destination), flush=True)
         return 0 if result['ok'] else 2
     except (Exception, KeyboardInterrupt) as error:
-        print('[airwallet] ' + (str(error) or 'Đã dừng.'), file=sys.stderr, flush=True)
+        # This handler catches everything raised outside run_signup (proxy setup,
+        # OTP client, Excel reading), and those exceptions can quote their input.
+        message = redact(str(error) or 'Đã dừng.', profile=profile, settings=config)
+        print('[airwallet] ' + message, file=sys.stderr, flush=True)
         return 1
     finally:
-        if guard is not None:
-            guard.close()
-        if session is not None:
-            session.detach()
+        # Independent cleanup steps: a failure in one must not skip the next, or
+        # a raising guard.close() would leak the Frida session for the rest of
+        # the process. Report rather than swallow -- a silent `pass` here is the
+        # same mistake the modal guard used to make.
+        for label, close in (('guard modal', guard.close if guard is not None else None),
+                             ('phiên Frida', session.detach if session is not None else None)):
+            if close is None:
+                continue
+            try:
+                close()
+            except Exception as cleanup_error:
+                print(f'[airwallet] Không dọn được {label}: {cleanup_error}',
+                      file=sys.stderr, flush=True)
 
 
 if __name__ == '__main__':

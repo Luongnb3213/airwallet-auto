@@ -342,6 +342,10 @@ class SpringBoardAlertGuard:
         self.session = None
         self.script = None
         self.tapped: list[str] = []
+        self.failures = 0
+        self.max_failures = 5
+        self.degraded = False
+        self.last_error = ""
         self._stop = threading.Event()
         pid = springboard_pid(device)
         if not pid:
@@ -363,8 +367,26 @@ class SpringBoardAlertGuard:
         while not self._stop.wait(self.interval):
             try:
                 self.sweep()
-            except Exception:
-                pass
+            except Exception as exc:
+                # A silent `pass` here meant that if the SpringBoard session
+                # died, the guard stopped declining modals while the run
+                # carried on believing it was protected. Count the failures,
+                # log the first one and the point where we give up, and expose
+                # `degraded` so the caller can report it.
+                self.failures += 1
+                if self.failures == 1:
+                    self.last_error = str(exc)
+                    print(f"[airwallet-dom] Guard modal iOS loi: {exc}", file=sys.stderr, flush=True)
+                if self.failures >= self.max_failures:
+                    self.degraded = True
+                    print(
+                        f"[airwallet-dom] Guard modal iOS da dung sau {self.failures} loi lien tiep; "
+                        "modal xin quyen cua iOS KHONG con duoc tu dong tu choi.",
+                        file=sys.stderr, flush=True,
+                    )
+                    return
+            else:
+                self.failures = 0
 
     def close(self) -> None:
         self._stop.set()
@@ -631,7 +653,11 @@ def run_with_frida(args: argparse.Namespace) -> Any:
     if args.action in ("run", "step"):
         from flow import ensure_configured, validate_profile, load_settings, build_otp_client
         ensure_configured()
-        profile = validate_profile(load_profile(args.profile_json))
+        # An in-process caller (airwallet_full_flow) hands the profile over in
+        # memory. Writing it to disk first would put a plaintext PIN in a file
+        # that a SIGKILL'd run cannot clean up.
+        supplied = getattr(args, "profile_data", None)
+        profile = validate_profile(supplied if supplied is not None else load_profile(args.profile_json))
         args.settings = load_settings()
         from inputs import select_device_id
         args.device_id = select_device_id(args.device_id, profile=profile, settings=args.settings)
@@ -673,6 +699,22 @@ def run_with_frida(args: argparse.Namespace) -> Any:
         script.load()
         time.sleep(args.load_wait)
         ex = script.exports_sync
+
+        def finish(result):
+            """Record whether the iOS modal guard was still working.
+
+            Without this, a guard that died mid-run left no trace in the dump
+            and the run looked protected when it was not.
+            """
+            if guard is not None and isinstance(result, dict):
+                result["alert_guard"] = {
+                    "degraded": bool(guard.degraded),
+                    "failures": int(guard.failures),
+                    "tapped": list(guard.tapped),
+                    "last_error": guard.last_error,
+                }
+            return result
+
         if args.action == "screen":
             return ex.snapshot()
         if args.action == "step":
@@ -680,14 +722,24 @@ def run_with_frida(args: argparse.Namespace) -> Any:
             old_max = args.max_steps
             args.max_steps = 1
             try:
-                return run_airwallet(ex, profile, args)
+                return finish(run_airwallet(ex, profile, args))
             finally:
                 args.max_steps = old_max
-        return run_airwallet(ex, profile, args)
+        return finish(run_airwallet(ex, profile, args))
     finally:
+        # Same defect as main.py had: a raising guard.close() skipped
+        # session.detach() and leaked the Frida session. Isolate each step.
         if guard:
-            guard.close()
-        session.detach()
+            try:
+                guard.close()
+            except Exception as cleanup_error:
+                print(f"[airwallet-dom] Không dọn được guard modal: {cleanup_error}",
+                      file=sys.stderr, flush=True)
+        try:
+            session.detach()
+        except Exception as cleanup_error:
+            print(f"[airwallet-dom] Không detach được phiên Frida: {cleanup_error}",
+                  file=sys.stderr, flush=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -740,7 +792,11 @@ def main() -> int:
         json_print(result)
         return 2 if isinstance(result, dict) and result.get('ok') is False else 0
     except Exception as exc:
-        print(f"[airwallet-dom] {exc}", file=sys.stderr)
+        # Third-party exceptions quote their input; never let a PIN or API key
+        # reach stderr, which airwallet_batch_flow captures into its log.
+        from src.utils.redaction import redact
+        print(f"[airwallet-dom] {redact(str(exc), profile=getattr(args, 'profile_data', None))}",
+              file=sys.stderr)
         return 1
 
 

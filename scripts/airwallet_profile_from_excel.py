@@ -195,8 +195,27 @@ def profile_from_record(record: dict) -> dict:
 
 
 def write_profile_json(profile: dict, out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Write the profile owner-only, and say out loud that it holds a PIN.
+
+    This file is persistent, not temporary: it is the default --profile-json of
+    airwallet_dom_runner.py, so a plaintext PIN and account password stay on
+    disk until someone deletes them.
+    """
+    from src.utils.secret_files import is_owner_only, write_private_json
+
+    written = write_private_json(out_path, profile, indent=2)
+    sensitive = sorted(key for key in ("pin", "account_password", "password") if profile.get(key))
+    if sensitive:
+        if is_owner_only(written):
+            scope = "quyền đã giới hạn về chỉ chủ sở hữu"
+        else:
+            scope = "CHƯA giới hạn được quyền - file đang đọc được bởi account khác"
+        print(
+            f"[profile] {written} chứa {', '.join(sensitive)} dạng plaintext; {scope}. "
+            "Xoá sau khi dùng.",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def main() -> int:

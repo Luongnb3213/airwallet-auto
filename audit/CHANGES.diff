@@ -1,0 +1,816 @@
+--- a/driver.py
++++ b/driver.py
+@@ -26,7 +26,11 @@
+     app = next((a for a in device.enumerate_applications() if a.identifier == BUNDLE), None)
+     if app is None:
+         raise RuntimeError(f'Chưa tìm thấy AirWallet ({BUNDLE}) trên {device.name}.')
+-    suspended = not app.pid
++    # Two separate facts: whether the process is still suspended right now, and
++    # whether we are the ones who launched it. The second decides who owns it on
++    # the failure path, and it must survive the resume below.
++    spawned_here = not app.pid
++    suspended = spawned_here
+     pid = app.pid or device.spawn([BUNDLE])
+     session = None
+     try:
+@@ -43,12 +47,20 @@
+         time.sleep(wait_seconds)
+         return device, session, script, messages
+     except BaseException:
+-        try:
+-            if suspended:
+-                device.resume(pid)
+-        finally:
+-            if session is not None:
++        # connect() either hands back a working session or leaves no trace. A
++        # process we spawned and could not attach to would otherwise stay on the
++        # device, suspended or half-initialised, for nobody.
++        # Each step is isolated so cleanup never masks the original failure.
++        if session is not None:
++            try:
+                 session.detach()
++            except Exception:
++                pass
++        if spawned_here:
++            try:
++                device.kill(pid)
++            except Exception:
++                pass
+         raise
+ 
+ 
+--- a/main.py
++++ b/main.py
+@@ -12,6 +12,7 @@
+ from inputs import load_signup_input, select_device_id
+ from diagnostics import diagnose, pretty_diagnosis
+ from src.core.airwallet_proxy import prepare_profile_proxy
++from src.utils.redaction import redact
+ 
+ ROOT = Path(__file__).resolve().parent
+ 
+@@ -47,13 +48,15 @@
+     args = parser.parse_args()
+     session = None
+     guard = None
++    # Bound before the try so the redacting handler below can always reach them.
++    config = {}
++    profile = None
+     try:
+         if args.action == 'devices':
+             print(json.dumps([{'id': d.id, 'name': d.name, 'type': d.type}
+                               for d in driver.frida.enumerate_devices() if d.type == 'usb'], ensure_ascii=False, indent=2))
+             return 0
+         config = load_config(args.config)
+-        profile = None
+         if args.action == 'signup':
+             ensure_configured()
+             try:
+@@ -108,13 +111,25 @@
+         print('Saved: ' + str(destination), flush=True)
+         return 0 if result['ok'] else 2
+     except (Exception, KeyboardInterrupt) as error:
+-        print('[airwallet] ' + (str(error) or 'Đã dừng.'), file=sys.stderr, flush=True)
++        # This handler catches everything raised outside run_signup (proxy setup,
++        # OTP client, Excel reading), and those exceptions can quote their input.
++        message = redact(str(error) or 'Đã dừng.', profile=profile, settings=config)
++        print('[airwallet] ' + message, file=sys.stderr, flush=True)
+         return 1
+     finally:
+-        if guard is not None:
+-            guard.close()
+-        if session is not None:
+-            session.detach()
++        # Independent cleanup steps: a failure in one must not skip the next, or
++        # a raising guard.close() would leak the Frida session for the rest of
++        # the process. Report rather than swallow -- a silent `pass` here is the
++        # same mistake the modal guard used to make.
++        for label, close in (('guard modal', guard.close if guard is not None else None),
++                             ('phiên Frida', session.detach if session is not None else None)):
++            if close is None:
++                continue
++            try:
++                close()
++            except Exception as cleanup_error:
++                print(f'[airwallet] Không dọn được {label}: {cleanup_error}',
++                      file=sys.stderr, flush=True)
+ 
+ 
+ if __name__ == '__main__':
+--- a/scripts/spawn_throttle.py
++++ b/scripts/spawn_throttle.py
+@@ -95,10 +95,18 @@
+                 continue
+             try:
+                 _try_lock(candidate)
+-                fd = candidate
+-                break
+             except OSError:
+                 os.close(candidate)
++                continue          # slot is held by someone else; try the next one
++            except BaseException:
++                # msvcrt/fcntl can raise beyond OSError (ValueError on a bad fd,
++                # KeyboardInterrupt mid-call). Close before unwinding, or the
++                # descriptor leaks for the life of the process.
++                os.close(candidate)
++                raise
++            else:
++                fd = candidate
++                break
+         if fd is not None:
+             break
+         if time.time() >= deadline:
+--- a/scripts/airwallet_dom_runner.py
++++ b/scripts/airwallet_dom_runner.py
+@@ -342,6 +342,10 @@
+         self.session = None
+         self.script = None
+         self.tapped: list[str] = []
++        self.failures = 0
++        self.max_failures = 5
++        self.degraded = False
++        self.last_error = ""
+         self._stop = threading.Event()
+         pid = springboard_pid(device)
+         if not pid:
+@@ -363,8 +367,26 @@
+         while not self._stop.wait(self.interval):
+             try:
+                 self.sweep()
+-            except Exception:
+-                pass
++            except Exception as exc:
++                # A silent `pass` here meant that if the SpringBoard session
++                # died, the guard stopped declining modals while the run
++                # carried on believing it was protected. Count the failures,
++                # log the first one and the point where we give up, and expose
++                # `degraded` so the caller can report it.
++                self.failures += 1
++                if self.failures == 1:
++                    self.last_error = str(exc)
++                    print(f"[airwallet-dom] Guard modal iOS loi: {exc}", file=sys.stderr, flush=True)
++                if self.failures >= self.max_failures:
++                    self.degraded = True
++                    print(
++                        f"[airwallet-dom] Guard modal iOS da dung sau {self.failures} loi lien tiep; "
++                        "modal xin quyen cua iOS KHONG con duoc tu dong tu choi.",
++                        file=sys.stderr, flush=True,
++                    )
++                    return
++            else:
++                self.failures = 0
+ 
+     def close(self) -> None:
+         self._stop.set()
+@@ -631,7 +653,11 @@
+     if args.action in ("run", "step"):
+         from flow import ensure_configured, validate_profile, load_settings, build_otp_client
+         ensure_configured()
+-        profile = validate_profile(load_profile(args.profile_json))
++        # An in-process caller (airwallet_full_flow) hands the profile over in
++        # memory. Writing it to disk first would put a plaintext PIN in a file
++        # that a SIGKILL'd run cannot clean up.
++        supplied = getattr(args, "profile_data", None)
++        profile = validate_profile(supplied if supplied is not None else load_profile(args.profile_json))
+         args.settings = load_settings()
+         from inputs import select_device_id
+         args.device_id = select_device_id(args.device_id, profile=profile, settings=args.settings)
+@@ -673,6 +699,22 @@
+         script.load()
+         time.sleep(args.load_wait)
+         ex = script.exports_sync
++
++        def finish(result):
++            """Record whether the iOS modal guard was still working.
++
++            Without this, a guard that died mid-run left no trace in the dump
++            and the run looked protected when it was not.
++            """
++            if guard is not None and isinstance(result, dict):
++                result["alert_guard"] = {
++                    "degraded": bool(guard.degraded),
++                    "failures": int(guard.failures),
++                    "tapped": list(guard.tapped),
++                    "last_error": guard.last_error,
++                }
++            return result
++
+         if args.action == "screen":
+             return ex.snapshot()
+         if args.action == "step":
+@@ -680,14 +722,24 @@
+             old_max = args.max_steps
+             args.max_steps = 1
+             try:
+-                return run_airwallet(ex, profile, args)
++                return finish(run_airwallet(ex, profile, args))
+             finally:
+                 args.max_steps = old_max
+-        return run_airwallet(ex, profile, args)
++        return finish(run_airwallet(ex, profile, args))
+     finally:
++        # Same defect as main.py had: a raising guard.close() skipped
++        # session.detach() and leaked the Frida session. Isolate each step.
+         if guard:
+-            guard.close()
+-        session.detach()
++            try:
++                guard.close()
++            except Exception as cleanup_error:
++                print(f"[airwallet-dom] Không dọn được guard modal: {cleanup_error}",
++                      file=sys.stderr, flush=True)
++        try:
++            session.detach()
++        except Exception as cleanup_error:
++            print(f"[airwallet-dom] Không detach được phiên Frida: {cleanup_error}",
++                  file=sys.stderr, flush=True)
+ 
+ 
+ def build_parser() -> argparse.ArgumentParser:
+@@ -740,7 +792,11 @@
+         json_print(result)
+         return 2 if isinstance(result, dict) and result.get('ok') is False else 0
+     except Exception as exc:
+-        print(f"[airwallet-dom] {exc}", file=sys.stderr)
++        # Third-party exceptions quote their input; never let a PIN or API key
++        # reach stderr, which airwallet_batch_flow captures into its log.
++        from src.utils.redaction import redact
++        print(f"[airwallet-dom] {redact(str(exc), profile=getattr(args, 'profile_data', None))}",
++              file=sys.stderr)
+         return 1
+ 
+ 
+--- a/scripts/airwallet_full_flow.py
++++ b/scripts/airwallet_full_flow.py
+@@ -188,13 +188,19 @@
+ 
+ def main() -> int:
+     args = build_parser().parse_args()
++    from src.utils.secret_files import reap_stale
++    # Older revisions wrote the profile (with the PIN) here and relied on a
++    # `finally` that a SIGKILL'd row never reached. Reclaim any leftovers.
++    stale = reap_stale(ROOT_DIR / 'agents' / 'runtime', 'input_*.json', 3600)
++    if stale:
++        print(f'[flow] Đã xoá {len(stale)} file profile tạm sót lại từ lần chạy trước '
++              f'(chứa PIN plaintext).', flush=True)
+     from flow import ensure_configured, validate_profile, load_settings, build_otp_client
+     from airwallet_profile_from_excel import load_row, profile_from_record
+     from airwallet_dom_runner import run_with_frida, build_parser as dom_parser
+     ensure_configured()
+     xlsx = Path(args.xlsx).expanduser()
+     settings = load_settings()
+-    runtime_profile = None
+     result = None
+     try:
+         record, row_number, sheet = load_row(xlsx, args.sheet, args.row)
+@@ -221,10 +227,7 @@
+             if not isinstance(crane_result, dict) or crane_result.get('ok') is not True:
+                 raise RuntimeError('Crane chưa xác nhận container sẵn sàng; chưa mở app để đăng ký.')
+         safe_device = re.sub(r'[^A-Za-z0-9_.-]+', '_', args.device_id)[:48]
+-        runtime_profile = ROOT_DIR / 'agents' / 'runtime' / f'input_{safe_device}_{row_number}_{os.getpid()}.json'
+-        runtime_profile.parent.mkdir(parents=True, exist_ok=True)
+-        runtime_profile.write_text(json.dumps(profile, ensure_ascii=False), encoding='utf-8')
+-        dom_args = ['--action', 'run', '--profile-json', str(runtime_profile), '--device-id', args.device_id,
++        dom_args = ['--action', 'run', '--device-id', args.device_id,
+                     '--max-steps', str(args.max_steps), '--wait-timeout-ms', str(args.wait_timeout_ms)]
+         if not args.no_container:
+             dom_args.append('--fresh-launch')
+@@ -232,6 +235,11 @@
+             dom_args.append('--no-submit')
+         parsed_dom_args = dom_parser().parse_args(dom_args)
+         parsed_dom_args.proxy_prepared = True
++        # run_with_frida runs in this process, so hand the profile over in
++        # memory. It used to be written to agents/runtime/input_*.json and
++        # deleted in `finally` -- but airwallet_batch_flow kills a hung row with
++        # SIGKILL, which no `finally` survives, leaving a plaintext PIN on disk.
++        parsed_dom_args.profile_data = profile
+         result = run_with_frida(parsed_dom_args)
+         result['proxy'] = proxy_result
+         destination = ROOT_DIR / 'dumps' / f'row-{row_number}-{safe_device}-{os.getpid()}.json'
+@@ -259,9 +267,7 @@
+             write_row_status(xlsx, args.sheet, args.row, 'FAILED', message)
+         print('[airwallet] ' + message, file=sys.stderr, flush=True)
+         return 1
+-    finally:
+-        if runtime_profile is not None:
+-            runtime_profile.unlink(missing_ok=True)
++
+ 
+ 
+ if __name__ == "__main__":
+--- a/scripts/airwallet_profile_from_excel.py
++++ b/scripts/airwallet_profile_from_excel.py
+@@ -195,8 +195,27 @@
+ 
+ 
+ def write_profile_json(profile: dict, out_path: Path) -> None:
+-    out_path.parent.mkdir(parents=True, exist_ok=True)
+-    out_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
++    """Write the profile owner-only, and say out loud that it holds a PIN.
++
++    This file is persistent, not temporary: it is the default --profile-json of
++    airwallet_dom_runner.py, so a plaintext PIN and account password stay on
++    disk until someone deletes them.
++    """
++    from src.utils.secret_files import is_owner_only, write_private_json
++
++    written = write_private_json(out_path, profile, indent=2)
++    sensitive = sorted(key for key in ("pin", "account_password", "password") if profile.get(key))
++    if sensitive:
++        if is_owner_only(written):
++            scope = "quyền đã giới hạn về chỉ chủ sở hữu"
++        else:
++            scope = "CHƯA giới hạn được quyền - file đang đọc được bởi account khác"
++        print(
++            f"[profile] {written} chứa {', '.join(sensitive)} dạng plaintext; {scope}. "
++            "Xoá sau khi dùng.",
++            file=sys.stderr,
++            flush=True,
++        )
+ 
+ 
+ def main() -> int:
+--- a/scripts/crane_container_manager.py
++++ b/scripts/crane_container_manager.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import argparse
++import contextlib
+ import json
+ import os
+ import re
+@@ -843,7 +844,91 @@
+     return xlsx_path.parent / f".~lock.{xlsx_path.name}#"
+ 
+ 
++@contextlib.contextmanager
++def container_assignment_lock(xlsx_path: Path, timeout: float = 180.0):
++    """Serialise container *selection* across processes.
++
++    Why this is needed: picking a container is a read-decide-write across the
++    workbook. `assigned_container_rows()` reads which containers other rows
++    already hold, `ensure_row()` picks one that looks free, and only the final
++    `write_crane_assignment()` takes `excel_write_lock`. With one
++    `ensure-row` process per device (airwallet_batch_flow starts a thread per
++    device, each spawning airwallet_full_flow, which spawns this script), two
++    processes can both read "container X is free" and both claim it -- putting
++    two accounts in one container.
++
++    Deliberately a *separate* lock file from `excel_write_lock`: that lock is
++    not reentrant, and `write_crane_assignment` takes it while we hold this one.
++
++    The whole decision, including the Crane RPC, runs under this lock. That
++    serialises assignment across devices, which is acceptable because
++    `crane_slots_default()` already caps concurrent Crane host sessions at 2.
++    If the added latency ever matters, the next step is to claim the container
++    in Excel before the RPC and release the lock earlier.
++    """
++    path = Path(xlsx_path).expanduser()
++    lock_path = path.parent / f".{path.name}.crane-assign.lock"
++    try:
++        lock_path.parent.mkdir(parents=True, exist_ok=True)
++        handle = lock_path.open("a+b")
++    except OSError as error:
++        # Cannot create the lock: say so and continue unserialised rather than
++        # stop the farm. The race returns, so this is worth a log line.
++        print(f"[crane] Không tạo được lock gán container ({error}); "
++              "chạy không tuần tự hoá, có nguy cơ hai row trùng container.",
++              file=sys.stderr, flush=True)
++        yield
++        return
++    try:
++        if os.name == "nt":
++            import msvcrt
++
++            handle.seek(0, os.SEEK_END)
++            if handle.tell() == 0:
++                handle.write(bytes(1))
++                handle.flush()
++            deadline = time.monotonic() + max(1.0, float(timeout))
++            while True:
++                try:
++                    handle.seek(0)
++                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
++                    break
++                except OSError:
++                    if time.monotonic() >= deadline:
++                        raise RuntimeError(
++                            "Hết thời gian chờ khóa gán container Crane."
++                        ) from None
++                    time.sleep(0.05)
++        else:
++            import fcntl
++
++            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
++        try:
++            yield
++        finally:
++            try:
++                if os.name == "nt":
++                    import msvcrt
++
++                    handle.seek(0)
++                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
++                else:
++                    import fcntl
++
++                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
++            except OSError:
++                pass
++    finally:
++        handle.close()
++
++
+ def ensure_row(args: argparse.Namespace) -> dict:
++    """Select and record this row's container, serialised across processes."""
++    with container_assignment_lock(Path(args.xlsx).expanduser()):
++        return _ensure_row_locked(args)
++
++
++def _ensure_row_locked(args: argparse.Namespace) -> dict:
+     from airwallet_profile_from_excel import load_row, profile_from_record
+ 
+     xlsx_path = Path(args.xlsx).expanduser()
+--- a/uitest/adapter.py
++++ b/uitest/adapter.py
+@@ -32,6 +32,7 @@
+ from .errors import (
+     AmbiguousSelectorError,
+     BusinessActionNotAuthorizedError,
++    ContainerChangedError,
+     ElementNotFoundError,
+     ElementNotInteractableError,
+     ExpectationFailedError,
+@@ -66,6 +67,7 @@
+     elapsed: float
+     recovered: str = ""
+     fallback_selector: bool = False
++    container_id: str = ""
+ 
+ 
+ @dataclass
+@@ -338,8 +340,31 @@
+                 f"Foreground app is {snapshot.bundle_id!r}, but the authorized target is "
+                 f"{self._target.bundle_id!r}. Stopping rather than driving an unknown app."
+             )
++        self._verify_container_stamp(snapshot)
+         return snapshot
+ 
++    def _verify_container_stamp(self, snapshot: Snapshot) -> None:
++        """Cross-check the snapshot's container id against the bound container.
++
++        Two independent sources must agree: what Crane reports as active (the
++        container session) and what the backend stamped onto this snapshot. A
++        disagreement means the dump cannot be trusted to belong to the container
++        the test thinks it is driving, so the run stops.
++
++        An empty stamp means the backend has no container provider wired up --
++        not a mismatch, so it is allowed; the snapshot then simply carries no
++        container evidence.
++        """
++        if self._container is None or not snapshot.container_id:
++            return
++        expected = getattr(self._container, "container_id", "")
++        if expected and snapshot.container_id != expected:
++            raise ContainerChangedError(
++                f"Snapshot reports container {snapshot.container_id!r} but this session is "
++                f"bound to {expected!r}. Stopping: the observed UI does not belong to the "
++                "container under test."
++            )
++
+     def _assert_container(self) -> None:
+         if self._container is not None:
+             self._container.assert_stable()
+@@ -555,6 +580,7 @@
+             token=snapshot.token().structure[:12], expectation=expect.describe(),
+             elapsed=self._clock() - started, recovered=recovered,
+             fallback_selector=selector.uses_fallback,
++            container_id=snapshot.container_id,
+         ))
+ 
+     def _scrub(self, error: UITestError) -> UITestError:
+--- a/uitest/backends/wda.py
++++ b/uitest/backends/wda.py
+@@ -55,15 +55,27 @@
+     """Drive a licensed test build through WebDriverAgent over HTTP."""
+ 
+     def __init__(self, session, base_url: str, session_id: str, bundle_id: str, *,
+-                 request_timeout: float = 15.0) -> None:
++                 request_timeout: float = 15.0,
++                 container_id_provider=None) -> None:
+         """``session`` is anything with ``requests.Session``'s ``get``/``post``
+-        interface, injected so tests can supply a double."""
++        interface, injected so tests can supply a double.
++
++        ``container_id_provider`` is an optional zero-argument callable that
++        returns the active Crane container id. XCUITest knows nothing about
++        Crane, so the id is supplied from outside and stamped onto every
++        snapshot -- that is what lets a dump prove which container produced it.
++        It is read once and cached: a container cannot change while a
++        :class:`~uitest.crane.CraneContainerSession` holds the app, and that
++        session fails the run if it does.
++        """
+         self._session = session
+         self._base = base_url.rstrip("/")
+         self._session_id = session_id
+         self._bundle_id = bundle_id
+         self._timeout = float(request_timeout)
+         self._closed = False
++        self._container_id_provider = container_id_provider
++        self._container_id: str | None = None
+ 
+     @property
+     def name(self) -> str:
+@@ -136,7 +148,26 @@
+         screen_id = self._screen_id(root)
+         return Snapshot(bundle_id=bundle_id, screen_id=screen_id, root=root,
+                         window=window if not window.empty else root.frame,
+-                        alert=alert, keyboard=keyboard)
++                        alert=alert, keyboard=keyboard,
++                        container_id=self._resolve_container_id())
++
++    def _resolve_container_id(self) -> str:
++        """The active container id, read once and cached.
++
++        A provider failure must not fail a read: the snapshot simply carries no
++        container id, and the caller can see that it is missing rather than get
++        a wrong one.
++        """
++        if self._container_id is not None:
++            return self._container_id
++        if self._container_id_provider is None:
++            self._container_id = ""
++            return self._container_id
++        try:
++            self._container_id = str(self._container_id_provider() or "")
++        except Exception:
++            self._container_id = ""
++        return self._container_id
+ 
+     @staticmethod
+     def _alert_from(node: dict[str, Any]) -> Alert:
+--- a/tests/test_wrapper.py
++++ b/tests/test_wrapper.py
+@@ -6,6 +6,10 @@
+ import unittest
+ from unittest.mock import patch
+ 
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from frida_stub import install_frida_stub
++
++install_frida_stub()  # no-op when the real frida is installed
+ import driver
+ import main
+ from flow import ensure_configured
+--- a/tests/test_launch_order.py
++++ b/tests/test_launch_order.py
+@@ -6,6 +6,10 @@
+ import unittest
+ from unittest.mock import Mock, patch
+ 
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from frida_stub import install_frida_stub
++
++install_frida_stub()  # no-op when the real frida is installed
+ import driver
+ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
+ import airwallet_dom_runner as runner
+--- a/tests/test_device_assignment.py
++++ b/tests/test_device_assignment.py
+@@ -6,6 +6,10 @@
+ import unittest
+ from unittest.mock import patch
+ 
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from frida_stub import install_frida_stub
++
++install_frida_stub()  # no-op when the real frida is installed
+ import driver
+ import main
+ 
+--- a/tests/test_proxy.py
++++ b/tests/test_proxy.py
+@@ -13,6 +13,10 @@
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ sys.path.insert(0, str(ROOT / 'scripts'))
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from frida_stub import install_frida_stub
++
++install_frida_stub()  # no-op when the real frida is installed
+ from src.core.airwallet_proxy import parse_proxy, reserve_proxy, prepare_account_proxy
+ from scripts.proxy_switcher import Phone, apply_proxy
+ import airwallet_full_flow as full
+--- a/tests/test_respring.py
++++ b/tests/test_respring.py
+@@ -10,6 +10,10 @@
+ from unittest.mock import Mock, patch
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from frida_stub import install_frida_stub
++
++install_frida_stub()  # no-op when the real frida is installed
+ import airwallet_dom_runner as runner
+ import airwallet_batch_flow as batch
+ import powerselector
+--- a/tests/test_credential_hygiene.py
++++ b/tests/test_credential_hygiene.py
+@@ -5,13 +5,14 @@
+ `sys.modules` before those imports so these tests cover the real code paths
+ anywhere, without a device.
+ """
++import contextlib
++import io
+ import json
+ import os
+ import stat
+ import subprocess
+ import sys
+ import tempfile
+-import types
+ import unittest
+ from pathlib import Path
+ from types import SimpleNamespace
+@@ -21,16 +22,10 @@
+ sys.path.insert(0, str(ROOT))
+ sys.path.insert(0, str(ROOT / 'scripts'))
+ 
+-if 'frida' not in sys.modules:  # pragma: no cover - environment shim
+-    stub = types.ModuleType('frida')
+-    stub.enumerate_devices = lambda: []
+-    stub.get_device = lambda *a, **k: None
+-    stub.get_usb_device = lambda *a, **k: None
+-    sys.modules['frida'] = stub
+-if 'frida_tools' not in sys.modules:  # pragma: no cover - environment shim
+-    tools = types.ModuleType('frida_tools')
+-    tools.__file__ = str(ROOT / 'frida_tools' / '__init__.py')
+-    sys.modules['frida_tools'] = tools
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from frida_stub import install_frida_stub
++
++install_frida_stub()  # no-op when the real frida is installed
+ 
+ from src.utils.redaction import PLACEHOLDER, Redactor, redact
+ from src.utils.secret_files import is_owner_only, reap_stale, write_private_json
+@@ -184,9 +179,100 @@
+         self.assertIn("reap_stale", source)
+ 
+     def test_outer_handlers_redact(self):
++        """Structural floor only -- the behavioural checks are in RedactingBoundaryTests."""
+         for name in ('main.py', 'scripts/airwallet_dom_runner.py'):
+             source = (ROOT / name).read_text(encoding='utf-8')
+-            self.assertIn('redact', source, f'{name} must scrub secrets before printing')
++            self.assertIn('redact(', source, f'{name} must scrub secrets before printing')
++
++
++class RedactingBoundaryTests(unittest.TestCase):
++    """Run the real entry points and read what they actually printed.
++
++    A mutation check showed the structural test above still passes when the
++    `redact(...)` call is removed, because the import line keeps the word in the
++    file. These tests fail in that case.
++    """
++
++    SECRET = 'env-otpbase-key-9f3a1c'
++
++    def test_main_does_not_print_a_credential_from_an_exception(self):
++        import main as entry
++
++        errors = io.StringIO()
++        argv = ['main.py', 'snapshot']
++        with patch.dict(os.environ, {'AIRWALLET_OTPBASE_API_KEY': self.SECRET}, clear=False), \
++             patch.object(sys, 'argv', argv), \
++             patch.object(entry, 'load_config',
++                          side_effect=RuntimeError(f'GET https://api.example/x?key={self.SECRET}')), \
++             contextlib.redirect_stderr(errors), \
++             contextlib.redirect_stdout(io.StringIO()):
++            code = entry.main()
++
++        printed = errors.getvalue()
++        self.assertEqual(code, 1)
++        self.assertNotIn(self.SECRET, printed, 'the API key reached stderr')
++        self.assertIn('[redacted]', printed)
++
++    def test_dom_runner_does_not_print_a_credential_from_an_exception(self):
++        import airwallet_dom_runner as runner
++
++        errors = io.StringIO()
++        args = runner.build_parser().parse_args(['--action', 'screen'])
++        with patch.dict(os.environ, {'AIRWALLET_OTPBASE_API_KEY': self.SECRET}, clear=False), \
++             patch.object(sys, 'argv', ['airwallet_dom_runner.py', '--action', 'screen']), \
++             patch.object(runner, 'build_parser') as parser, \
++             patch.object(runner, 'import_frida', return_value=object()), \
++             patch.object(runner, 'run_with_frida',
++                          side_effect=RuntimeError(f'proxy auth failed for {self.SECRET}')), \
++             contextlib.redirect_stderr(errors), \
++             contextlib.redirect_stdout(io.StringIO()):
++            parser.return_value.parse_args.return_value = args
++            code = runner.main()
++
++        printed = errors.getvalue()
++        self.assertEqual(code, 1)
++        self.assertNotIn(self.SECRET, printed, 'the API key reached stderr')
++        self.assertIn('[redacted]', printed)
++
++    def test_profile_secrets_are_redacted_too(self):
++        """Not just env credentials: a PIN quoted by an exception must go as well."""
++        from src.utils.redaction import redact
++
++        message = redact('row rejected: pin=0042 password=TestOnly123',
++                         profile={'pin': '0042', 'account_password': 'TestOnly123'})
++        self.assertNotIn('0042', message)
++        self.assertNotIn('TestOnly123', message)
++
++
++class ProfileExportTests(unittest.TestCase):
++    """`write_profile_json` is the persistent PIN-on-disk path (S4)."""
++
++    def test_exported_profile_is_owner_only_and_warns(self):
++        from airwallet_profile_from_excel import write_profile_json
++
++        errors = io.StringIO()
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory) / 'current_profile.json'
++            with contextlib.redirect_stderr(errors):
++                write_profile_json(dict(PROFILE), path)
++
++            self.assertEqual(json.loads(path.read_text(encoding='utf-8')), PROFILE)
++            self.assertTrue(is_owner_only(path),
++                            'the exported profile holds a PIN and must not be world-readable')
++
++        warning = errors.getvalue()
++        self.assertIn('plaintext', warning, 'the operator must be told what the file holds')
++        self.assertIn('pin', warning)
++
++    def test_a_profile_without_secrets_is_not_warned_about(self):
++        from airwallet_profile_from_excel import write_profile_json
++
++        errors = io.StringIO()
++        with tempfile.TemporaryDirectory() as directory:
++            path = Path(directory) / 'p.json'
++            with contextlib.redirect_stderr(errors):
++                write_profile_json({'phone_number': '07012345678'}, path)
++        self.assertEqual(errors.getvalue(), '')
+ 
+ 
+ if __name__ == '__main__':
+--- a/tests/test_alert_guard_diagnostics.py
++++ b/tests/test_alert_guard_diagnostics.py
+@@ -7,7 +7,6 @@
+ """
+ import sys
+ import threading
+-import types
+ import unittest
+ from pathlib import Path
+ 
+@@ -15,12 +14,10 @@
+ sys.path.insert(0, str(ROOT))
+ sys.path.insert(0, str(ROOT / 'scripts'))
+ 
+-if 'frida' not in sys.modules:  # pragma: no cover - environment shim
+-    stub = types.ModuleType('frida')
+-    stub.enumerate_devices = lambda: []
+-    sys.modules['frida'] = stub
+-if 'frida_tools' not in sys.modules:  # pragma: no cover - environment shim
+-    sys.modules['frida_tools'] = types.ModuleType('frida_tools')
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from frida_stub import install_frida_stub
++
++install_frida_stub()  # no-op when the real frida is installed
+ 
+ from airwallet_dom_runner import SpringBoardAlertGuard
+ 
+--- a/tests/test_resource_cleanup.py
++++ b/tests/test_resource_cleanup.py
+@@ -14,7 +14,6 @@
+ import io
+ import os
+ import sys
+-import types
+ import unittest
+ from pathlib import Path
+ from types import SimpleNamespace
+@@ -24,16 +23,10 @@
+ sys.path.insert(0, str(ROOT))
+ sys.path.insert(0, str(ROOT / 'scripts'))
+ 
+-if 'frida' not in sys.modules:  # pragma: no cover - environment shim
+-    stub = types.ModuleType('frida')
+-    stub.enumerate_devices = lambda: []
+-    stub.get_device = lambda *a, **k: None
+-    stub.get_usb_device = lambda *a, **k: None
+-    sys.modules['frida'] = stub
+-if 'frida_tools' not in sys.modules:  # pragma: no cover - environment shim
+-    tools = types.ModuleType('frida_tools')
+-    tools.__file__ = str(ROOT / 'frida_tools' / '__init__.py')
+-    sys.modules['frida_tools'] = tools
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from frida_stub import install_frida_stub
++
++install_frida_stub()  # no-op when the real frida is installed
+ 
+ import driver
+ import spawn_throttle
