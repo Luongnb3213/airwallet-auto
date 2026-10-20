@@ -1,0 +1,454 @@
+{
+  "source": "LINE_COIN",
+  "backend": "Android/Xiaowei",
+  "execution_enabled": false,
+  "entry_screens": {
+    "INTRO_1": {
+      "state": "START",
+      "title": "Giới thiệu 1",
+      "markers": [
+        "エアウォレットなら"
+      ],
+      "primary_button": [
+        "次へ進む"
+      ],
+      "field_labels": [],
+      "button_coordinate_key": "intro_1_next",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    "INTRO_2": {
+      "state": "START",
+      "title": "Giới thiệu 2",
+      "markers": [
+        "お店でもネットでも"
+      ],
+      "primary_button": [
+        "次へ進む"
+      ],
+      "field_labels": [],
+      "button_coordinate_key": "intro_2_next",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    "INTRO_3": {
+      "state": "START",
+      "title": "Giới thiệu 3",
+      "markers": [
+        "安心のセキュリティ対策と"
+      ],
+      "primary_button": [
+        "はじめる"
+      ],
+      "field_labels": [],
+      "button_coordinate_key": "intro_3_start",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    "NOTIFICATION_INFO": {
+      "state": "START",
+      "title": "Giới thiệu thông báo",
+      "markers": [
+        "大切なお知らせを受け取りましょう"
+      ],
+      "primary_button": [
+        "次へ進む"
+      ],
+      "field_labels": [],
+      "button_coordinate_key": "notification_next",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    "NOTIFICATION_PERMISSION": {
+      "state": "START",
+      "title": "Từ chối quyền thông báo",
+      "markers": [
+        "通知",
+        "notifications",
+        "thông báo"
+      ],
+      "primary_button": [
+        "許可しない",
+        "Don't allow",
+        "Don’t allow",
+        "Không cho phép"
+      ],
+      "field_labels": [],
+      "button_coordinate_key": "notification_deny",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    "LOGIN": {
+      "state": "START",
+      "title": "Đăng nhập — chuyển sang tạo tài khoản",
+      "markers": [
+        "アカウントをお持ちでない方はこちら"
+      ],
+      "primary_button": [
+        "アカウントをお持ちでない方はこちら"
+      ],
+      "field_labels": [],
+      "button_coordinate_key": "login_to_register",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    "ACCOUNT": {
+      "state": "ACCOUNT_CREATE_SCREEN",
+      "title": "Màn 1 — Tạo tài khoản",
+      "markers": [
+        "まずはアカウントをつくりましょう",
+        "アカウントの新規作成"
+      ],
+      "primary_button": [
+        "アカウントの新規作成"
+      ],
+      "field_labels": [],
+      "button_coordinate_key": "account_create_button",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    }
+  },
+  "entry_transitions": {
+    "INTRO_1": [
+      "INTRO_2"
+    ],
+    "INTRO_2": [
+      "INTRO_3"
+    ],
+    "INTRO_3": [
+      "NOTIFICATION_INFO",
+      "NOTIFICATION_PERMISSION",
+      "ACCOUNT"
+    ],
+    "NOTIFICATION_INFO": [
+      "NOTIFICATION_PERMISSION",
+      "ACCOUNT"
+    ],
+    "NOTIFICATION_PERMISSION": [
+      "ACCOUNT"
+    ],
+    "LOGIN": [
+      "ACCOUNT"
+    ],
+    "ACCOUNT": []
+  },
+  "registration_screens": [
+    {
+      "state": "ACCOUNT_CREATE_SCREEN",
+      "title": "Màn 1 — Tạo tài khoản",
+      "markers": [
+        "まずはアカウントをつくりましょう",
+        "アカウントの新規作成"
+      ],
+      "primary_button": [
+        "アカウントの新規作成"
+      ],
+      "field_labels": [],
+      "button_coordinate_key": "account_create_button",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    {
+      "state": "PHONE_INPUT_SCREEN",
+      "title": "Màn 2 — Nhập số điện thoại",
+      "markers": [
+        "電話番号の入力",
+        "携帯電話番号"
+      ],
+      "primary_button": [
+        "SMSでの認証へ進む"
+      ],
+      "field_labels": [
+        "携帯電話番号",
+        "電話番号"
+      ],
+      "button_coordinate_key": "sms_button",
+      "field_coordinate_key": "phone_field",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    {
+      "state": "SMS_CODE_SCREEN",
+      "title": "Màn 3 — Nhập mã xác thực",
+      "markers": [
+        "認証コードの入力",
+        "認証コード",
+        "次へ進む"
+      ],
+      "primary_button": [
+        "次へ進む"
+      ],
+      "field_labels": [
+        "認証コード"
+      ],
+      "button_coordinate_key": "next_button",
+      "field_coordinate_key": "code_field",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    {
+      "state": "PASSWORD_SCREEN",
+      "title": "Màn 4 — Mật khẩu",
+      "markers": [
+        "パスワードの入力",
+        "パスワード"
+      ],
+      "primary_button": [
+        "次へ進む"
+      ],
+      "field_labels": [
+        "パスワード"
+      ],
+      "button_coordinate_key": "password_screen_button",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    {
+      "state": "KANA_NAME_SCREEN",
+      "title": "Màn 5 — Tên Kana",
+      "markers": [
+        "カナ氏名の入力",
+        "カナ氏名",
+        "氏名"
+      ],
+      "primary_button": [
+        "次へ進む"
+      ],
+      "field_labels": [
+        "カナ",
+        "氏名"
+      ],
+      "button_coordinate_key": "kana_name_screen_button",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    {
+      "state": "BIRTHDAY_SCREEN",
+      "title": "Màn 6 — Ngày sinh",
+      "markers": [
+        "生年月日",
+        "誕生日"
+      ],
+      "primary_button": [
+        "次へ進む"
+      ],
+      "field_labels": [
+        "生年月日"
+      ],
+      "button_coordinate_key": "birthday_screen_button",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    {
+      "state": "PIN_SCREEN",
+      "title": "Màn 7 — Mã PIN",
+      "markers": [
+        "暗証番号",
+        "PIN"
+      ],
+      "primary_button": [
+        "次へ進む"
+      ],
+      "field_labels": [
+        "暗証番号"
+      ],
+      "button_coordinate_key": "pin_screen_button",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": [
+        "暗証番号の再入力",
+        "暗証番号を再入力",
+        "再入力"
+      ]
+    },
+    {
+      "state": "RE_PIN_SCREEN",
+      "title": "Màn 8 — Nhập lại PIN",
+      "markers": [
+        "暗証番号の再入力",
+        "暗証番号を再入力",
+        "再入力"
+      ],
+      "primary_button": [
+        "次へ進む"
+      ],
+      "field_labels": [
+        "暗証番号"
+      ],
+      "button_coordinate_key": "re_pin_screen_button",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    {
+      "state": "FACE_ID_SCREEN",
+      "title": "Màn 9 — Face ID",
+      "markers": [
+        "暗証番号のかわりに生体認証を利用しますか",
+        "利用しない",
+        "顔認証",
+        "Face ID"
+      ],
+      "primary_button": [
+        "利用しない"
+      ],
+      "field_labels": [],
+      "button_coordinate_key": "face_id_screen_button",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    {
+      "state": "CREATION_COMPLETE_SCREEN",
+      "title": "Màn 10 — Hoàn tất",
+      "markers": [
+        "アカウント作成完了",
+        "アカウントが作成されました",
+        "登録完了"
+      ],
+      "primary_button": [
+        "次へ進む",
+        "確認"
+      ],
+      "field_labels": [],
+      "button_coordinate_key": "creation_complete_screen_button",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    {
+      "state": "INVITATION_SCREEN",
+      "title": "Màn 11 — Mã giới thiệu",
+      "markers": [
+        "招待コード",
+        "紹介コード"
+      ],
+      "primary_button": [
+        "スキップ",
+        "次へ進む"
+      ],
+      "field_labels": [
+        "招待コード"
+      ],
+      "button_coordinate_key": "invitation_screen_button",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    },
+    {
+      "state": "ACCOUNT_SETUP_SCREEN",
+      "title": "Màn 12 — Thiết lập",
+      "markers": [
+        "アカウント設定",
+        "設定"
+      ],
+      "primary_button": [
+        "後で設定する"
+      ],
+      "field_labels": [],
+      "button_coordinate_key": "account_setup_screen_button",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    }
+  ],
+  "optional_screens": [
+    {
+      "state": "CREATION_COMPLETE_SCREEN",
+      "title": "Màn tùy chọn — Liên kết Recruit ID",
+      "markers": [
+        "リクルートID",
+        "各種キャンペーンの参加には",
+        "今は連携しない"
+      ],
+      "primary_button": [
+        "今は連携しない"
+      ],
+      "field_labels": [],
+      "button_coordinate_key": "",
+      "field_coordinate_key": "",
+      "error_markers": [],
+      "excluded_markers": []
+    }
+  ],
+  "allowed_transitions": {
+    "START": [
+      "ACCOUNT_CREATE_SCREEN",
+      "FAILED"
+    ],
+    "ACCOUNT_CREATE_SCREEN": [
+      "FAILED",
+      "PHONE_INPUT_SCREEN"
+    ],
+    "PHONE_INPUT_SCREEN": [
+      "FAILED",
+      "SMS_CODE_SCREEN"
+    ],
+    "SMS_CODE_SCREEN": [
+      "FAILED",
+      "FLOW_COMPLETED",
+      "PASSWORD_SCREEN"
+    ],
+    "PASSWORD_SCREEN": [
+      "FAILED",
+      "KANA_NAME_SCREEN"
+    ],
+    "KANA_NAME_SCREEN": [
+      "BIRTHDAY_SCREEN",
+      "FAILED"
+    ],
+    "BIRTHDAY_SCREEN": [
+      "FAILED",
+      "PIN_SCREEN"
+    ],
+    "PIN_SCREEN": [
+      "FAILED",
+      "RE_PIN_SCREEN"
+    ],
+    "RE_PIN_SCREEN": [
+      "CREATION_COMPLETE_SCREEN",
+      "FACE_ID_SCREEN",
+      "FAILED"
+    ],
+    "FACE_ID_SCREEN": [
+      "CREATION_COMPLETE_SCREEN",
+      "FAILED"
+    ],
+    "CREATION_COMPLETE_SCREEN": [
+      "FAILED",
+      "FLOW_COMPLETED",
+      "INVITATION_SCREEN"
+    ],
+    "INVITATION_SCREEN": [
+      "ACCOUNT_SETUP_SCREEN",
+      "FAILED"
+    ],
+    "ACCOUNT_SETUP_SCREEN": [
+      "FAILED",
+      "FLOW_COMPLETED"
+    ],
+    "FLOW_COMPLETED": [],
+    "FAILED": []
+  },
+  "input_columns": [
+    "email",
+    "password",
+    "name",
+    "account_password"
+  ],
+  "status_columns": [
+    "status",
+    "message"
+  ]
+}

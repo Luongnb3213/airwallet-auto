@@ -1,0 +1,29 @@
+{
+  "xlsx_path": "data/airwallet_template.xlsx",
+  "active_sheet": "Inputs",
+  "run_limit": 0,
+  "wait_seconds": 10,
+  "device_id": "auto",
+  "respring_every": 30,
+  "weak_respring_every": 15,
+  "weak_devices": "",
+  "respring_compressor_mb": 800,
+  "respring_cooldown_sec": 5,
+  "row_timeout_sec": 180,
+  "log_compressor": true,
+  "spawn_slots": 3,
+  "crane_slots": 2,
+  "app_name": "AirWallet_Reg",
+  "app_id": "jp.coinplus.app",
+  "launch_wait_seconds": 3,
+  "otpbase_api_key": "",
+  "otp_timeout_seconds": 120,
+  "otp_poll_seconds": 2,
+  "registration_defaults": {
+    "account_password": "",
+    "kana_sei": "",
+    "kana_mei": "",
+    "birthday": "",
+    "pin": ""
+  }
+}

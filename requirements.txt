@@ -1,0 +1,9 @@
+beautifulsoup4
+colorlog
+frida==17.19.0
+openpyxl
+playwright
+python-dateutil
+requests
+urllib3<2
+frida-tools
